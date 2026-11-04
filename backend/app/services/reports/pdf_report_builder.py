@@ -236,6 +236,7 @@ class PdfReportBuilder:
         """
         async with async_playwright() as p:
             browser = None
+            page = None
             try:
                 browser = await cls._launch_browser(p)
                 page = await browser.new_page()
@@ -280,6 +281,11 @@ class PdfReportBuilder:
                 )
                 return pdf_bytes
             finally:
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
                 if browser:
                     try:
                         await browser.close()
@@ -291,16 +297,29 @@ class PdfReportBuilder:
         """
         Launches Chromium headless browser safely across Windows and Linux cloud hosts.
         Supports standard Linux container flags (--no-sandbox, --disable-dev-shm-usage).
-        Tries host Chrome, host Edge, standard Playwright Chromium, and known binary paths.
+        Tries standard Playwright Chromium, host Chrome, host Edge, and known binary paths.
         """
         launch_errors = []
         launch_args = [
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--no-zygote",
+            "--font-render-hinting=none",
         ]
 
-        # 1. Try host installed Google Chrome (standard on Windows/Linux)
+        # 1. Try standard Playwright Chromium (Render & cloud container default)
+        try:
+            return await playwright_instance.chromium.launch(
+                headless=True,
+                args=launch_args,
+            )
+        except Exception as e:
+            launch_errors.append(f"playwright_chromium: {e}")
+
+        # 2. Try host installed Google Chrome (standard on Windows/Linux)
         try:
             return await playwright_instance.chromium.launch(
                 headless=True,
@@ -310,7 +329,7 @@ class PdfReportBuilder:
         except Exception as e:
             launch_errors.append(f"chrome_channel: {e}")
 
-        # 2. Try host installed Microsoft Edge
+        # 3. Try host installed Microsoft Edge
         try:
             return await playwright_instance.chromium.launch(
                 headless=True,
@@ -320,27 +339,19 @@ class PdfReportBuilder:
         except Exception as e:
             launch_errors.append(f"msedge_channel: {e}")
 
-        # 3. Try standard Playwright Chromium (Render & cloud container default)
-        try:
-            return await playwright_instance.chromium.launch(
-                headless=True,
-                args=launch_args,
-            )
-        except Exception as e:
-            launch_errors.append(f"playwright_chromium: {e}")
-
         # 4. Try standard Windows and Linux executable paths
         known_paths = [
+            # Linux (Render, Ubuntu, Debian, Docker)
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
             # Windows
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            # Linux (Render, Ubuntu, Debian)
-            "/usr/bin/google-chrome",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/snap/bin/chromium",
         ]
         for kp in known_paths:
             if Path(kp).exists():

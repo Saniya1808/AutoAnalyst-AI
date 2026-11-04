@@ -149,7 +149,7 @@ async def export_pdf_report(
             detail=err_msg,
         )
     except RuntimeError as re:
-        logger.error(f"PDF rendering error for '{dataset_id}': {re}")
+        logger.error(f"PDF rendering error for '{dataset_id}': {re}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="PDF generation engine encountered an internal error. Please check server browser configuration.",

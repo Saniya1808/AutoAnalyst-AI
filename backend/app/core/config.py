@@ -16,10 +16,12 @@ class Settings(BaseSettings):
     FRONTEND_ORIGIN: Union[str, List[str]] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://auto-analyst-ai.vercel.app",
+        "https://autoanalyst-ai.vercel.app",
     ]
     # Restricted Vercel preview regex (restricted to AutoAnalyst AI preview deployments)
     FRONTEND_ORIGIN_REGEX: Optional[str] = (
-        r"^https://autoanalyst-ai(-[a-zA-Z0-9_-]+)?\.vercel\.app$"
+        r"^https://(autoanalyst-ai|auto-analyst-ai)(-[a-zA-Z0-9_-]+)?\.vercel\.app$"
     )
 
     # Dataset upload & profiling configuration
