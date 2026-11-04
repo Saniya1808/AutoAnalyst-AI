@@ -4,9 +4,13 @@ import {
   BarChart3,
   CircleHelp,
   Files,
+  FileText,
   Gauge,
   Home,
+  MessageSquare,
   Settings2,
+  Sparkles,
+  Wand2,
 } from 'lucide-react'
 
 interface WorkspaceSidebarProps {
@@ -23,8 +27,12 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
   const navItems = [
     { id: 'overview', label: 'Overview', icon: Gauge },
     { id: 'datasets', label: 'My datasets', icon: Files },
+    { id: 'cleaning', label: 'Data Cleaning', icon: Wand2 },
     { id: 'dashboards', label: 'Dashboards', icon: BarChart3 },
-    { id: 'analysis', label: 'AI analysis', icon: Activity },
+    { id: 'insights', label: 'Automated Insights', icon: Sparkles },
+    { id: 'reports', label: 'Executive Reports', icon: FileText },
+    { id: 'ask', label: 'Ask your data', icon: MessageSquare },
+    { id: 'analysis', label: 'AI Understanding', icon: Activity },
   ]
 
   return (
