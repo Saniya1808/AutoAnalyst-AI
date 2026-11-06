@@ -438,3 +438,261 @@ def test_offline_deterministic_fallback_text_query():
     assert data["mode"] == "statistical_fallback"
     assert data["primary_metric"]["value"] == 2
 
+
+class _MockLLMProvider(GeminiProvider):
+    """Mock LLM Provider for testing AI query interpretation with mock Gemini responses."""
+    def __init__(self):
+        super().__init__(api_key="mock_gemini_api_key", model_name="gemini-mock")
+        self.recorded_prompt: str = ""
+
+    async def generate_json(self, prompt: str, system_instruction: str, timeout_seconds: int = 30):
+        self.recorded_prompt = prompt
+        return {
+            "plan_id": "plan_mock_1234",
+            "intent": "aggregate_metric",
+            "operation": "mean",
+            "primary_column": "revenue",
+            "secondary_column": None,
+            "group_by_columns": [],
+            "filters": [],
+            "sort": None,
+            "limit": 10,
+            "date_granularity": None,
+            "chart": {"chart_type": "none"},
+            "is_ambiguous": False,
+            "clarification_reason": None,
+            "suggested_clarifications": [],
+        }
+
+
+def test_question_interpreter_dict_top_values_regression():
+    """
+    Regression Test: Ensure ColumnProfile with dictionary-based top_values
+    does not raise AttributeError: 'dict' object has no attribute 'value',
+    and formats top_categories as a list of strings.
+    """
+    import asyncio
+    from app.services.ai.question_interpreter import QuestionInterpreter
+    from app.models.dataset import ColumnProfile
+
+    async def _test():
+        columns = [
+            ColumnProfile(
+                name="category",
+                position=0,
+                data_type="string",
+                raw_dtype="object",
+                non_null_count=100,
+                null_count=0,
+                null_percentage=0.0,
+                unique_count=5,
+                is_unique=False,
+                sample_values=["Tech", "Finance"],
+                top_values=[
+                    {"value": "Tech", "count": 60},
+                    {"value": "Finance", "count": 30},
+                    {"value": "Health", "count": 10},
+                ],
+            ),
+            ColumnProfile(
+                name="revenue",
+                position=1,
+                data_type="float",
+                raw_dtype="float64",
+                non_null_count=100,
+                null_count=0,
+                null_percentage=0.0,
+                unique_count=80,
+                is_unique=False,
+                sample_values=[100.0, 200.0],
+                min=50.0,
+                max=500.0,
+                mean=250.0,
+            ),
+        ]
+
+        mock_provider = _MockLLMProvider()
+        plan, mode = await QuestionInterpreter.interpret_question(
+            question="What is the average revenue?",
+            columns=columns,
+            row_count=100,
+            provider=mock_provider,
+        )
+
+        assert mode == "ai_generated"
+        assert plan.operation == "mean"
+        assert plan.primary_column == "revenue"
+
+        # Verify that recorded_prompt contains top_categories as string labels, not dicts
+        assert '"top_categories": [' in mock_provider.recorded_prompt
+        assert '"Tech"' in mock_provider.recorded_prompt
+        assert '"Finance"' in mock_provider.recorded_prompt
+        assert '"count": 60' not in mock_provider.recorded_prompt
+
+    asyncio.run(_test())
+
+
+def test_question_interpreter_object_top_values_regression():
+    """
+    Regression Test: Ensure duck-typed column profiles with object-based top_values (.value attribute)
+    are also supported cleanly by the question interpreter.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from app.services.ai.question_interpreter import QuestionInterpreter
+
+    async def _test():
+        obj_item1 = SimpleNamespace(value="Marketing", count=45)
+        obj_item2 = SimpleNamespace(value="Sales", count=35)
+
+        columns = [
+            SimpleNamespace(
+                name="department",
+                data_type="string",
+                null_count=0,
+                unique_count=2,
+                min=None,
+                max=None,
+                mean=None,
+                top_values=[obj_item1, obj_item2],
+            ),
+            SimpleNamespace(
+                name="revenue",
+                data_type="float",
+                null_count=0,
+                unique_count=50,
+                min=100.0,
+                max=500.0,
+                mean=275.0,
+                top_values=None,
+            ),
+        ]
+
+        mock_provider = _MockLLMProvider()
+        plan, mode = await QuestionInterpreter.interpret_question(
+            question="What is the average revenue?",
+            columns=columns,
+            row_count=80,
+            provider=mock_provider,
+        )
+
+        assert mode == "ai_generated"
+        assert '"Marketing"' in mock_provider.recorded_prompt
+        assert '"Sales"' in mock_provider.recorded_prompt
+
+    asyncio.run(_test())
+
+
+def test_question_interpreter_graceful_fallback_on_unhandled_ai_exception():
+    """
+    Regression Test: Verify that any unexpected exception during AI query planning
+    gracefully falls back to HeuristicQuestionInterpreter without raising HTTP 500.
+    """
+    import asyncio
+    from app.services.ai.question_interpreter import QuestionInterpreter
+    from app.models.dataset import ColumnProfile
+
+    class _FailingLLMProvider(GeminiProvider):
+        def __init__(self):
+            super().__init__(api_key="mock_key", model_name="gemini-mock")
+
+        async def generate_json(self, prompt: str, system_instruction: str, timeout_seconds: int = 30):
+            raise RuntimeError("Simulated Gemini API service outage")
+
+    async def _test():
+        columns = [
+            ColumnProfile(
+                name="revenue",
+                position=0,
+                data_type="float",
+                raw_dtype="float64",
+                non_null_count=50,
+                null_count=0,
+                null_percentage=0.0,
+                unique_count=50,
+                is_unique=True,
+                sample_values=[10.0, 20.0],
+                min=10.0,
+                max=100.0,
+                mean=50.0,
+            ),
+        ]
+
+        failing_provider = _FailingLLMProvider()
+        plan, mode = await QuestionInterpreter.interpret_question(
+            question="What is the average revenue?",
+            columns=columns,
+            row_count=50,
+            provider=failing_provider,
+        )
+
+        # Must cleanly fall back rather than crashing
+        assert mode == "statistical_fallback"
+        assert plan.operation == "mean"
+        assert plan.primary_column == "revenue"
+
+    asyncio.run(_test())
+
+
+def test_ask_endpoint_with_active_gemini_key_and_dict_top_values(monkeypatch):
+    """
+    End-to-End Regression Test:
+    When GEMINI_API_KEY is configured in settings and the dataset contains
+    categorical columns (which profiler populates with dict-based top_values),
+    the /ask endpoint must succeed with 200 OK without crashing with 500 AttributeError.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "mock_active_production_key")
+
+    async def mock_generate_json(self, prompt: str, system_instruction: str, timeout_seconds: int = 30):
+        # Distinguish between QueryPlan generation and Answer synthesis
+        if "QueryPlan JSON" in prompt or "DATASET SCHEMA" in prompt:
+            assert "top_categories" in prompt
+            return {
+                "plan_id": "plan_e2e_prod_fix",
+                "intent": "group_by_comparison",
+                "operation": "sum",
+                "primary_column": "sales",
+                "secondary_column": None,
+                "group_by_columns": ["region"],
+                "filters": [],
+                "sort": {"column": "sum_sales", "direction": "descending"},
+                "limit": 10,
+                "date_granularity": None,
+                "chart": {"chart_type": "bar", "title": "Sales by Region"},
+                "is_ambiguous": False,
+                "clarification_reason": None,
+                "suggested_clarifications": [],
+            }
+        else:
+            return {
+                "direct_answer": "Total sales by region calculated successfully.",
+                "suggested_follow_ups": ["Which region has highest sales?", "Show sales distribution"],
+            }
+
+    monkeypatch.setattr(GeminiProvider, "generate_json", mock_generate_json)
+
+    # Upload dataset with repeated string values to trigger profiler.top_values
+    csv_data = "region,sales\nNorth,100\nSouth,200\nNorth,300\nEast,150\nNorth,400\nSouth,250\n"
+    ds_id = upload_sample_dataset(csv_data, "prod_e2e_fix.csv")
+
+    # Verify profiler produced top_values as dicts
+    detail = dataset_storage.get_dataset(ds_id)
+    region_col = next(c for c in detail.columns if c.name == "region")
+    assert region_col.top_values is not None
+    assert isinstance(region_col.top_values[0], dict)
+    assert region_col.top_values[0]["value"] == "North"
+
+    # Execute /ask - previously failed with HTTP 500 AttributeError: 'dict' object has no attribute 'value'
+    res = client.post(
+        f"/api/v1/datasets/{ds_id}/ask",
+        json={"question": "What is the total sales by region?", "include_chart": True},
+    )
+
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["mode"] == "ai_generated"
+    assert len(data["tabular_data"]) >= 3
+    north_row = next(r for r in data["tabular_data"] if r["region"] == "North")
+    assert north_row["sum_sales"] == 800

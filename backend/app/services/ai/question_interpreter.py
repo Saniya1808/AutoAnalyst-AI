@@ -1,7 +1,10 @@
 import json
+import logging
 import re
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 from app.models.ask_data import (
     QueryChartRecommendation,
     QueryFilterCondition,
@@ -809,59 +812,111 @@ class QuestionInterpreter:
             plan = HeuristicQuestionInterpreter.interpret(question, columns, recent_messages)
             return plan, "statistical_fallback"
 
-        schema_summary = []
-        for c in columns:
-            col_info = {
-                "name": c.name,
-                "data_type": c.data_type,
-                "null_count": c.null_count,
-                "unique_count": c.unique_count,
-            }
-            if c.min is not None and c.max is not None:
-                col_info["min"] = c.min
-                col_info["max"] = c.max
-                col_info["mean"] = c.mean
-            if c.top_values:
-                col_info["top_categories"] = [tv.value for tv in c.top_values[:3]]
-            schema_summary.append(col_info)
+        try:
+            schema_summary = []
+            for c in columns:
+                if isinstance(c, dict):
+                    col_name = c.get("name")
+                    data_type = c.get("data_type")
+                    null_count = c.get("null_count")
+                    unique_count = c.get("unique_count")
+                    c_min = c.get("min")
+                    c_max = c.get("max")
+                    c_mean = c.get("mean")
+                    c_top_values = c.get("top_values")
+                else:
+                    col_name = getattr(c, "name", None)
+                    data_type = getattr(c, "data_type", None)
+                    null_count = getattr(c, "null_count", None)
+                    unique_count = getattr(c, "unique_count", None)
+                    c_min = getattr(c, "min", None)
+                    c_max = getattr(c, "max", None)
+                    c_mean = getattr(c, "mean", None)
+                    c_top_values = getattr(c, "top_values", None)
 
-        history_summary = []
-        if recent_messages:
-            for m in recent_messages[-3:]:
-                history_summary.append({
-                    "role": m.get("role", "user"),
-                    "question": m.get("question") or m.get("content", ""),
-                    "columns_used": m.get("columns_used", []),
-                    "calculation_method": m.get("calculation_method", ""),
-                })
+                col_info = {
+                    "name": col_name,
+                    "data_type": data_type,
+                    "null_count": null_count,
+                    "unique_count": unique_count,
+                }
+                if c_min is not None and c_max is not None:
+                    col_info["min"] = c_min
+                    col_info["max"] = c_max
+                    col_info["mean"] = c_mean
 
-        system_instruction = (
-            "You are the analytical query planner for AutoAnalyst AI (Powered by Saniya). "
-            "Your objective is to translate user natural-language questions into a strict structured analytical QueryPlan JSON. "
-            "CRITICAL RULES:\n"
-            "1. Output MUST strictly match the required QueryPlan JSON schema.\n"
-            "2. Never invent columns; target columns MUST exactly match an available dataset column.\n"
-            "3. COLUMN DISAMBIGUATION: When user asks about an entity (like company, customer, product), choose the human-readable entity name column (e.g. 'Company Name'), NEVER technical columns like URL, Logo, ID, or Website unless specifically requested.\n"
-            "4. BROAD ANALYTICAL QUESTIONS:\n"
-            "   - If user asks for key findings, main insights, or 'what are the most important findings', set intent='automated_insights', operation='discover_insights', chart.chart_type='none'.\n"
-            "   - If user asks for best and worst performing categories, or top/bottom performers, set intent='best_worst_performers', operation='benchmark_performers', chart.chart_type='bar'.\n"
-            "   - If user asks for unusual patterns, anomalies, or outliers, set intent='anomaly_detection', operation='detect_anomalies', chart.chart_type='none'.\n"
-            "   - If user asks for recommendations, suggested actions, or what actions to take, set intent='business_recommendations', operation='recommend_actions', chart.chart_type='none'.\n"
-            "   - If user asks for data quality issues, health problems, or audit, set intent='data_quality_insights', operation='data_quality_audit', chart.chart_type='none'.\n"
-            "   - If user asks for temporal trends or if a metric is increasing/decreasing over time, set intent='trend_analysis', operation='analyze_trend', chart.chart_type='line'.\n"
-            "   - If user asks for highest/lowest month, best/worst period, set intent='period_benchmark', operation='benchmark_periods', chart.chart_type='bar'. Set period_mode='cyclical' if asking by weekday or calendar month, else 'chronological'.\n"
-            "   - If user asks for sudden drops, spikes, or unusual changes over time, set intent='temporal_anomaly', operation='detect_temporal_anomalies', chart.chart_type='line'.\n"
-            "   - If user asks for seasonal patterns or seasonality, set intent='seasonality_analysis', operation='detect_seasonality', chart.chart_type='bar'.\n"
-            "5. GENERAL DATASET QUESTIONS: When user asks what the dataset contains, explains the file, or asks for an overview, set intent='dataset_summary', operation='overview', chart.chart_type='none'.\n"
-            "6. TEXT SEARCH: When user asks for records starting with, ending with, or containing text, set intent='text_search', operation='filter_records', and add the appropriate filter condition with operator='starts_with'|'ends_with'|'contains'|'exact'.\n"
-            "7. DISTINCT / UNIQUE VALUES: When user asks for all unique or distinct names/categories, set intent='distinct_values', operation='unique_values'.\n"
-            "8. Allowed operations: count, sum, mean, median, min, max, std, percentage, value_counts, correlation, distribution, missing_summary, filter_records, unique_values, overview, discover_insights, benchmark_performers, detect_anomalies, recommend_actions, data_quality_audit, analyze_trend, benchmark_periods, detect_temporal_anomalies, detect_seasonality, none.\n"
-            "9. Allowed intents: aggregate_metric, group_by_comparison, correlation_analysis, distribution_analysis, trend_analysis, period_benchmark, temporal_anomaly, seasonality_analysis, ranking_top_bottom, filter_inspection, text_search, distinct_values, missing_value_inspection, dataset_summary, automated_insights, best_worst_performers, anomaly_detection, business_recommendations, data_quality_insights, ambiguous_clarification, unsupported_query.\n"
-            "10. Allowed operators: eq, ne, gt, gte, lt, lte, in, not_in, contains, not_contains, starts_with, ends_with, exact, between.\n"
-            "11. If a question is ambiguous or vague, set is_ambiguous=true and provide 2-3 specific suggested_clarifications."
-        )
+                if c_top_values:
+                    top_cats = []
+                    for tv in c_top_values[:3]:
+                        val = None
+                        if isinstance(tv, dict):
+                            val = tv.get("value")
+                            if val is None:
+                                val = tv.get("category") or tv.get("name") or tv.get("label")
+                        elif hasattr(tv, "value"):
+                            val = getattr(tv, "value", None)
+                        elif hasattr(tv, "category"):
+                            val = getattr(tv, "category", None)
+                        elif hasattr(tv, "name"):
+                            val = getattr(tv, "name", None)
+                        elif hasattr(tv, "label"):
+                            val = getattr(tv, "label", None)
+                        elif isinstance(tv, (str, int, float, bool)):
+                            val = str(tv)
 
-        prompt = f"""Interpret the following user question against the dataset schema and produce a structured QueryPlan JSON.
+                        if val is not None and not isinstance(val, (dict, list)):
+                            top_cats.append(str(val))
+
+                    if top_cats:
+                        col_info["top_categories"] = top_cats
+
+                schema_summary.append(col_info)
+
+            history_summary = []
+            if recent_messages:
+                for m in recent_messages[-3:]:
+                    if isinstance(m, dict):
+                        history_summary.append({
+                            "role": m.get("role", "user"),
+                            "question": m.get("question") or m.get("content", ""),
+                            "columns_used": m.get("columns_used", []),
+                            "calculation_method": m.get("calculation_method", ""),
+                        })
+                    else:
+                        history_summary.append({
+                            "role": getattr(m, "role", "user"),
+                            "question": getattr(m, "question", None) or getattr(m, "content", ""),
+                            "columns_used": getattr(m, "columns_used", []),
+                            "calculation_method": getattr(m, "calculation_method", ""),
+                        })
+
+            system_instruction = (
+                "You are the analytical query planner for AutoAnalyst AI (Powered by Saniya). "
+                "Your objective is to translate user natural-language questions into a strict structured analytical QueryPlan JSON. "
+                "CRITICAL RULES:\n"
+                "1. Output MUST strictly match the required QueryPlan JSON schema.\n"
+                "2. Never invent columns; target columns MUST exactly match an available dataset column.\n"
+                "3. COLUMN DISAMBIGUATION: When user asks about an entity (like company, customer, product), choose the human-readable entity name column (e.g. 'Company Name'), NEVER technical columns like URL, Logo, ID, or Website unless specifically requested.\n"
+                "4. BROAD ANALYTICAL QUESTIONS:\n"
+                "   - If user asks for key findings, main insights, or 'what are the most important findings', set intent='automated_insights', operation='discover_insights', chart.chart_type='none'.\n"
+                "   - If user asks for best and worst performing categories, or top/bottom performers, set intent='best_worst_performers', operation='benchmark_performers', chart.chart_type='bar'.\n"
+                "   - If user asks for unusual patterns, anomalies, or outliers, set intent='anomaly_detection', operation='detect_anomalies', chart.chart_type='none'.\n"
+                "   - If user asks for recommendations, suggested actions, or what actions to take, set intent='business_recommendations', operation='recommend_actions', chart.chart_type='none'.\n"
+                "   - If user asks for data quality issues, health problems, or audit, set intent='data_quality_insights', operation='data_quality_audit', chart.chart_type='none'.\n"
+                "   - If user asks for temporal trends or if a metric is increasing/decreasing over time, set intent='trend_analysis', operation='analyze_trend', chart.chart_type='line'.\n"
+                "   - If user asks for highest/lowest month, best/worst period, set intent='period_benchmark', operation='benchmark_periods', chart.chart_type='bar'. Set period_mode='cyclical' if asking by weekday or calendar month, else 'chronological'.\n"
+                "   - If user asks for sudden drops, spikes, or unusual changes over time, set intent='temporal_anomaly', operation='detect_temporal_anomalies', chart.chart_type='line'.\n"
+                "   - If user asks for seasonal patterns or seasonality, set intent='seasonality_analysis', operation='detect_seasonality', chart.chart_type='bar'.\n"
+                "5. GENERAL DATASET QUESTIONS: When user asks what the dataset contains, explains the file, or asks for an overview, set intent='dataset_summary', operation='overview', chart.chart_type='none'.\n"
+                "6. TEXT SEARCH: When user asks for records starting with, ending with, or containing text, set intent='text_search', operation='filter_records', and add the appropriate filter condition with operator='starts_with'|'ends_with'|'contains'|'exact'.\n"
+                "7. DISTINCT / UNIQUE VALUES: When user asks for all unique or distinct names/categories, set intent='distinct_values', operation='unique_values'.\n"
+                "8. Allowed operations: count, sum, mean, median, min, max, std, percentage, value_counts, correlation, distribution, missing_summary, filter_records, unique_values, overview, discover_insights, benchmark_performers, detect_anomalies, recommend_actions, data_quality_audit, analyze_trend, benchmark_periods, detect_temporal_anomalies, detect_seasonality, none.\n"
+                "9. Allowed intents: aggregate_metric, group_by_comparison, correlation_analysis, distribution_analysis, trend_analysis, period_benchmark, temporal_anomaly, seasonality_analysis, ranking_top_bottom, filter_inspection, text_search, distinct_values, missing_value_inspection, dataset_summary, automated_insights, best_worst_performers, anomaly_detection, business_recommendations, data_quality_insights, ambiguous_clarification, unsupported_query.\n"
+                "10. Allowed operators: eq, ne, gt, gte, lt, lte, in, not_in, contains, not_contains, starts_with, ends_with, exact, between.\n"
+                "11. If a question is ambiguous or vague, set is_ambiguous=true and provide 2-3 specific suggested_clarifications."
+            )
+
+            prompt = f"""Interpret the following user question against the dataset schema and produce a structured QueryPlan JSON.
 
 DATASET SCHEMA (Columns & Types):
 {json.dumps(schema_summary, indent=2)}
@@ -901,7 +956,6 @@ OUTPUT JSON SCHEMA:
 }}
 """
 
-        try:
             raw_plan_dict = await provider.generate_json(
                 prompt=prompt,
                 system_instruction=system_instruction,
@@ -913,7 +967,12 @@ OUTPUT JSON SCHEMA:
 
             plan = QueryPlan.model_validate(raw_plan_dict)
 
-            col_map = {c.name.lower(): c.name for c in columns}
+            col_map = {}
+            for c in columns:
+                c_name = c.get("name") if isinstance(c, dict) else getattr(c, "name", None)
+                if c_name:
+                    col_map[c_name.lower()] = c_name
+
             if plan.primary_column:
                 matched = col_map.get(plan.primary_column.lower())
                 if matched:
@@ -937,6 +996,10 @@ OUTPUT JSON SCHEMA:
 
             return plan, "ai_generated"
 
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                f"AI query planning failed, falling back to heuristic interpreter: {e}",
+                exc_info=True,
+            )
             plan = HeuristicQuestionInterpreter.interpret(question, columns, recent_messages)
             return plan, "statistical_fallback"
